@@ -1,0 +1,139 @@
+RAG_PUBMED — End-to-End Project Flow
+
+Purpose
+-------
+This repository implements a retrieval-augmented generation (RAG) style semantic search system for PubMed articles. The system fetches articles from PubMed, preprocesses and chunks text, converts chunks into embeddings, stores them in a FAISS vector index, and provides both:
+ - a Streamlit UI for interactive semantic search and display of top-relevant articles, and
+ - a chat/summary helper that synthesizes top article contents using an LLM (via Ollama).
+
+High-level flow (step-by-step)
+------------------------------
+1) Data Collection (Fetching from PubMed)
+   - Scripts involved:
+     - backend/fetch_pubmed.py (core fetching functions using NCBI eutils)
+     - fetch_pubmed_articles_batch.py (example batch runner for multiple topics)
+   - Behavior:
+     - Search PubMed via esearch to get PMIDs.
+     - Fetch article XML via efetch for each PMID.
+     - Extract Title, Abstract, PMID and PubMed URL.
+     - Save results to a raw JSON file (data/raw/pubmed_raw.json).
+   - Notes:
+     - The fetcher includes a small delay (time.sleep) to avoid hammering the PubMed servers.
+
+2) Preprocessing & Chunking
+   - Scripts involved:
+     - backend/text_processing.py (RecursiveCharacterTextSplitter via LangChain)
+     - embeddings.chunk_text (sentence-sentence chunker using NLTK)
+     - index_from_json.py and index_articles.py demonstrate two ways to create an index
+   - Behavior / choices:
+     - Text is normalized and broken into smaller "chunks" so long inputs are representable in vector space.
+     - `text_processing.clean_and_chunk()` uses LangChain's RecursiveCharacterTextSplitter (configurable chunk size and overlap).
+     - `backend.embeddings.chunk_text()` uses NLTK sentence tokenization to produce overlapping sentence chunks (defaults: min 2, max 5 sentences with an overlap of 1).
+   - Output:
+     - A processed, per-chunk JSON may be saved to data/processed/pubmed_clean.json (or similar), where each item includes pmid and chunk text.
+
+3) Embeddings
+   - File: backend/embeddings.py
+   - Model: sentence-transformers/all-MiniLM-L6-v2 (default), exposes TextEmbedder
+   - Behavior:
+     - The TextEmbedder loads SentenceTransformer and encodes chunks to dense embeddings (lists of floats, 384 dimensions by default for that model).
+
+4) Vector Indexing (FAISS)
+   - File: backend/vector_store.py
+   - Behavior:
+     - Index uses FAISS IndexFlatL2 for L2 distance search.
+     - Embeddings and per-chunk metadata are stored on disk:
+       - db/faiss_index.bin (FAISS index)
+       - db/id_mapping.pkl (pickle mapping index id -> chunk metadata)
+     - The VectorStore provides methods to add_embeddings() and search(query_embedding, k).
+   - Scripts that use this:
+     - index_articles.py: fetches articles for topics, chunks them, embeds, and stores in FAISS.
+     - index_from_json.py: reads a raw JSON and indexes the chunks.
+
+5) Retrieval + Querying (RAG pipeline)
+   - File: backend/rag_pipeline.py
+   - Behavior:
+     - The RAGPipeline composes the TextEmbedder and VectorStore.
+     - It loads chunked metadata for keyword checks (from the id_mapping pickle used by VectorStore).
+     - Query strategy includes:
+       - Dynamic query expansion: generates combinations of query keywords (two words or more) to produce multiple query variants.
+       - For each expansion, compute embeddings and perform vector search against FAISS.
+       - Apply a semantic score threshold (distances) to filter results.
+       - Keyword match logic is present but currently filtered out by a zero-score guard in the code (so semantic matches take priority).
+       - Deduplicate results by (pmid, chunk) and truncate to topk results.
+
+6) Application / User Interface
+   - File: app.py
+   - Behavior:
+     - Streamlit frontend provides a simple UI for entering an email (PubMed recommends including contact email when requesting their API) and a question.
+     - Buttons:
+       - "Show Top Articles" → runs pipeline.query(question, topk=5) and displays title, short abstract, link, and distance score.
+       - "Generate Summary" → runs chatbot_ollama.chatbot_answer(question, topk=5) to produce a concise summary using the LLM.
+   - Presentation:
+     - Custom CSS to make results readable and “card” styled.
+
+7) LLM Summaries / Chat
+   - File: chatbot_ollama.py
+   - Behavior:
+     - Uses RAGPipeline.query() to get the top-k relevant chunks for the question.
+     - Concatenates titles and abstracts into a single context string.
+     - Calls the Ollama SDK (ollama.chat) to request a summary via a chosen model (llama3.2 by default in this code).
+     - Returns a single, human-friendly summary that synthesizes multiple articles.
+
+8) Databases & files
+   - Raw and processed data paths:
+     - data/raw/pubmed_raw.json
+     - data/processed/pubmed_clean.json
+   - FAISS/DB files:
+     - db/faiss_index.bin
+     - db/id_mapping.pkl
+
+9) Requirements and Environment
+   - See requirements.txt which lists key dependencies (biopython, transformers, torch, faiss-cpu, streamlit). Additional dependencies also observed in code include:
+     - sentence-transformers
+     - nltk
+     - bs4 (BeautifulSoup)
+     - langchain
+     - ollama (for LLM integration)
+   - NLTK downloads: code attempts to download 'punkt' if missing.
+
+How to run (example workflow)
+----------------------------
+1) Fetch articles (create `data/raw`):
+   - Use `fetch_pubmed_articles_batch.py` to fetch a few topics or run `backend/fetch_pubmed.py` directly.
+
+2) Preprocess (optional):
+   - You can run `backend/text_processing.py` or `index_from_json.py` if you prefer to preprocess and write chunked JSON to data/processed.
+
+3) Create the embedding & index (FAISS):
+   - Example: `python index_from_json.py` (reads data/raw/pubmed_raw.json -> creates chunks -> embeds -> writes db/faiss_index.bin + db/id_mapping.pkl)
+   - Alternatively: `python index_articles.py` to fetch and index in one go.
+
+4) Start the UI:
+   - From the repo root run:
+     - `streamlit run app.py` (PowerShell example: streamlit run .\app.py)
+   - Visit the Streamlit URL in your browser to query and summarize.
+
+5) Summaries (LLM):
+   - The "Generate Summary" button uses the Ollama SDK. Make sure you have ollama running / SDK configured if you plan to use that feature.
+
+Important notes, assumptions and tips
+-----------------------------------
+ - PubMed usage: The fetcher uses public NCBI eutils. Respect NCBI usage policies and include a valid email as required by the API for larger requests.
+ - FAISS index persistence: If you re-index, the index files under `db/` will be overwritten; keep backups if needed.
+ - Embedding model size: 'all-MiniLM-L6-v2' encodes to 384 dimensions; VectorStore is configured for dim=384 by default.
+ - Performance: For very large datasets, IndexFlatL2 is an in-memory index; consider an IVF or HNSW-backed FAISS index for large-scale datasets.
+ - Reproducibility: Ensure the Python environment includes the packages referenced by `requirements.txt` and the extra dependencies (nltk, sentence-transformers, bs4, langchain, ollama).
+
+Appendix: Useful paths
+----------------------
+ - UI: app.py
+ - Query + pipeline: backend/rag_pipeline.py
+ - Embeddings: backend/embeddings.py
+ - Vector DB (add/search): backend/vector_store.py
+ - Fetcher: backend/fetch_pubmed.py, fetch_pubmed_articles_batch.py
+ - Indexers: index_articles.py, index_from_json.py
+ - Preprocessing helpers: backend/text_processing.py
+ - LLM helper: chatbot_ollama.py
+
+End of file

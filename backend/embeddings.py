@@ -2,6 +2,7 @@
 # Sentence-based chunking and sentence-transformers embedding
 from sentence_transformers import SentenceTransformer
 import nltk
+import torch
 
 # Download punkt if not already present
 try:
@@ -13,7 +14,9 @@ MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 class TextEmbedder:
     def __init__(self):
-        self.model = SentenceTransformer(MODEL_NAME)
+        # Use CPU explicitly to avoid meta tensor issues
+        device = "cpu"
+        self.model = SentenceTransformer(MODEL_NAME, device=device)
 
     def embed(self, texts):
         return self.model.encode(texts, show_progress_bar=False).tolist()
