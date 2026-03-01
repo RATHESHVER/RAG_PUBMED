@@ -1,4 +1,4 @@
-#RAG_PUBMED — Retrieval Augmented Generation for PubMed
+# RAG_PUBMED — Retrieval Augmented Generation for PubMed
 
 ___
 
